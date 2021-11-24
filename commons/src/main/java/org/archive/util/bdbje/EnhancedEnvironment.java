@@ -86,6 +86,7 @@ public class EnhancedEnvironment extends Environment {
      */
     public static EnhancedEnvironment getTestEnvironment(File dir) {
         EnvironmentConfig envConfig = new EnvironmentConfig();
+        envConfig.setConfigParam("je.freeDisk",String.valueOf(50*1024*1024));
         envConfig.setAllowCreate(true);
         envConfig.setTransactional(false);
         EnhancedEnvironment env;
