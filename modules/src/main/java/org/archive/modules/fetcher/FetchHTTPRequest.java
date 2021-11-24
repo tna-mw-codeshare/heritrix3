@@ -27,6 +27,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.UnknownHostException;
 import java.nio.charset.Charset;
@@ -41,6 +42,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 import javax.net.ssl.SSLSession;
 import javax.net.ssl.SSLSocket;
@@ -83,6 +85,7 @@ import org.apache.http.conn.socket.ConnectionSocketFactory;
 import org.apache.http.conn.socket.PlainConnectionSocketFactory;
 import org.apache.http.conn.ssl.AllowAllHostnameVerifier;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.conn.ssl.SSLContexts;
 import org.apache.http.entity.ContentLengthStrategy;
 import org.apache.http.entity.ContentType;
 import org.apache.http.entity.mime.HttpMultipartMode;
@@ -168,6 +171,9 @@ public class FetchHTTPRequest {
     protected HttpHost targetHost;
     protected boolean addedCredentials;
     protected HttpHost proxyHost;
+    protected InetSocketAddress socksAddress;
+    // store if we should proxy the URL or not
+    protected boolean socksRejectMatch;
     // make this a member variable so it doesn't get gc'd prematurely
     protected HttpClientConnectionManager connMan;
 
@@ -192,6 +198,42 @@ public class FetchHTTPRequest {
             requestLineUri = curi.getUURI().toString();
         } else {
             requestLineUri = curi.getUURI().getEscapedPathQuery();
+        }
+
+        String socksHostname = (String) fetcher.getAttributeEither(curi, "socksProxyHost");
+        Integer socksPort = null;
+
+        try {
+            socksPort = (Integer) fetcher.getAttributeEither(curi, "socksProxyPort");
+        } catch (NumberFormatException e) {
+            // invalid SOCKS5 port - initialisation below will be skipped over
+        }
+
+        // initialise a SOCKS5 socket address if one is requested
+        if (StringUtils.isNotEmpty(socksHostname) && socksPort != null) {
+            this.socksAddress = new InetSocketAddress(socksHostname, socksPort);
+            this.httpClientContext.setAttribute("socket.address", this.socksAddress);
+        }
+
+        // now, check to see if we have any reject regexes to process
+        List<Pattern> socksRejectPatterns = (List<Pattern>) fetcher.getAttributeEither(curi, "socksProxyRejectRegexList");
+        this.socksRejectMatch = false;
+
+        // instantiate an empty list if it doesn't exist
+        if(socksRejectPatterns == null) {
+            socksRejectPatterns = new ArrayList<>();
+        }
+
+        if(socksRejectPatterns.size() > 0) {
+            // iterate through the regexes
+            for (Pattern p: socksRejectPatterns) {
+                // TODO: check actual request URI, not stringified host
+                boolean matches = p.matcher(this.targetHost.toURI()).matches();
+                if(matches) {
+                    // this request should not be proxied
+                    this.socksRejectMatch = true;
+                }
+            }
         }
 
         if (curi.getFetchType() == FetchType.HTTP_POST) {
@@ -556,25 +598,37 @@ public class FetchHTTPRequest {
     }
 
     protected HttpClientConnectionManager buildConnectionManager() {
-        Registry<ConnectionSocketFactory> socketFactoryRegistry = RegistryBuilder.<ConnectionSocketFactory>create()
-                .register("http", PlainConnectionSocketFactory.INSTANCE)
-                .register(
-                        "https",
-                        new SSLConnectionSocketFactory(fetcher.sslContext(),
-                                new AllowAllHostnameVerifier()) {
+        Registry<ConnectionSocketFactory> socketFactoryRegistry = null;
 
-                            @Override
-                            public Socket createLayeredSocket(
-                                    final Socket socket, final String target,
-                                    final int port, final HttpContext context)
-                                    throws IOException {
+        // check for a socks address and no reject regex matches
+        if (this.socksAddress != null && !this.socksRejectMatch) {
+            // user our own custom SOCKS5 socket factories
+            socketFactoryRegistry = RegistryBuilder.<ConnectionSocketFactory>create()
+                    .register("http", new Socks5ConnectionSocketFactory())
+                    .register("https", new Socks5SSLConnectionSocketFactory(SSLContexts.createSystemDefault()))
+                    .build();
+        } else {
+            socketFactoryRegistry = RegistryBuilder.<ConnectionSocketFactory>create()
+                    .register("http", PlainConnectionSocketFactory.INSTANCE)
+                    .register(
+                            "https",
+                            new SSLConnectionSocketFactory(fetcher.sslContext(),
+                                    new AllowAllHostnameVerifier()) {
 
-                                return super.createLayeredSocket(socket,
-                                        isDisableSNI() ? "" : target, port,
-                                        context);
-                            }
-                        })
-                .build();
+                                @Override
+                                public Socket createLayeredSocket(
+                                        final Socket socket, final String target,
+                                        final int port, final HttpContext context)
+                                        throws IOException {
+
+                                    return super.createLayeredSocket(socket,
+                                            isDisableSNI() ? "" : target, port,
+                                            context);
+                                }
+                            })
+                    .build();
+        }
+
 
         DnsResolver dnsResolver = new ServerCacheResolver(fetcher.getServerCache());
 
