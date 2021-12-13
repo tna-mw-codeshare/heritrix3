@@ -300,6 +300,7 @@ public class BdbModule implements Lifecycle, Checkpointable, Closeable, Disposab
         EnvironmentConfig config = new EnvironmentConfig();
         config.setAllowCreate(create);
         config.setLockTimeout(75, TimeUnit.MINUTES); // set to max
+        config.setConfigParam(EnvironmentConfig.FREE_DISK, "1073741824");
 
         if (getCacheSize() > 0) {
             config.setCacheSize(getCacheSize());
